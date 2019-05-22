@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+# coding : utf-8
+import argparse
+import os.path
+from pathlib import Path
+import sys
+import logging
+import queue
+import threading
+import time
+
+
+from PNL.worker import Worker
+
+
+def percentage(part, whole):
+    return 100 * float(part) / float(whole)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Leak parser written in Python')
+    parser.add_argument('-D', '--debug', action='store_true', help='Launch the command in debug mode')
+    parser.add_argument('-d', '--directory', required=True, help='Directory to analyze')
+    parser.add_argument('-t', '--thread', required=False, default=1, type=int, help='Number of threads to create')
+    parser.add_argument('-e', '--extensions', nargs='+', choices=['noext', 'txt', 'zip'], required=True,
+                        help='File extensions to parse')
+    args = parser.parse_args()
+
+    if not os.path.exists(args.directory):
+        print('Supplied directory doesn\'t exist', file=sys.stderr)
+        exit(1)
+
+    log_file = os.path.join(args.directory, 'pnl.log')
+    my_logging_format = '%(asctime)s;%(levelname)s;%(threadName)s;%(message)s'
+
+    if args.debug:
+        logging.basicConfig(filename=log_file, level=logging.DEBUG, format=my_logging_format)
+    else:
+        logging.basicConfig(filename=log_file, level=logging.INFO, format=my_logging_format)
+
+    logger = logging.getLogger('pnl')
+
+    logger.info('Enumerating files')
+
+    fifo_in = queue.Queue()
+    fifo_out = queue.Queue()
+
+    for o in Path(args.directory).glob('**/*'):
+        if o.is_file():
+            if o.suffix == '' and 'noext' in args.extensions:
+                fifo_in.put(str(o))
+            elif o.suffix in args.extensions:
+                fifo_in.put(str(o))
+
+    logger.info('Found %d to analyze' % fifo_in.qsize())
+
+    start = time.time()
+
+    logger.info('Creating %d workers' % args.thread)
+    while threading.active_count() < args.thread + 1:
+        t = Worker(fifo_in, fifo_out)
+        t.start()
+        logger.debug('Created thread %d', t.ident)
+
+    try:
+        logger.info('Waiting for workers to finish')
+        while threading.active_count() > 1:
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        logger.info('PNL has been interrupted manually. Threads will be stopped')
+        for thread in threading.enumerate():
+            if thread is threading.main_thread():
+                continue
+            thread.stop.set()
+
+    # Get statistics
+    glob_total_credential = 0
+    glob_emailonly_credential = 0
+    glob_noemail_credential = 0
+    while True:
+        try:
+            tc, nc, ec = fifo_out.get(block=False)
+            print(tc, nc, ec)
+            glob_total_credential += tc
+            glob_emailonly_credential += ec
+            glob_noemail_credential += nc
+        except queue.Empty:
+            logger.info('Collected all stats from workers')
+            break
+
+    #Display statistics
+    glob_noemail_credential_percent = percentage(glob_noemail_credential, glob_total_credential)
+    glob_emailonly_credential_percent = percentage(glob_emailonly_credential, glob_total_credential)
+    print('Found total credentials:', glob_total_credential)
+    print('Found email only credentials:', glob_emailonly_credential,
+          '({:.2f})'.format(glob_emailonly_credential_percent))
+    print('Found no email credentials:', glob_noemail_credential, '({:.2f})'.format(glob_noemail_credential_percent))
+
+    # Execution time
+    end = time.time()
+    hours, rem = divmod(end - start, 3600)
+    minutes, seconds = divmod(rem, 60)
+
+    print('Execution time:', '{:0>2}:{:0>2}:{:05.2f}'.format(int(hours), int(minutes), seconds))
+    logger.info('Workers have finished')
+
+
+if __name__ == "__main__":
+    main()
