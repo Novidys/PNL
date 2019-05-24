@@ -9,3 +9,23 @@
 This script is an attempt to parse leak files and send extracted credentials to a Redis channel.
 
 # How to launch
+```
+usage: pnl [-h] -c CHANNEL [-H HOST] [-P PORT] [-D] -d DIRECTORY [-w WORKER]
+           -e {noext,txt,zip} [{noext,txt,zip} ...]
+
+Leak parser written in Python
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -c CHANNEL, --channel CHANNEL
+                        Redis channel to write to
+  -H HOST, --host HOST  Redis host to connect to
+  -P PORT, --port PORT  Redis port to connect to
+  -D, --debug           Launch the command in debug mode
+  -d DIRECTORY, --directory DIRECTORY
+                        Directory to analyze
+  -w WORKER, --worker WORKER
+                        Number of workers to create
+  -e {noext,txt,zip} [{noext,txt,zip} ...], --extensions {noext,txt,zip} [{noext,txt,zip} ...]
+                        File extensions to parse
+``
