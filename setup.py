@@ -14,4 +14,9 @@ setup(
     scripts=['bin/pnl'],
     package_data={
         'pnl': ['VERSION'],
-    })
+    },
+    python_requires='>=3.6.*, <4',
+    install_requires=[
+        'chardet',
+        'redis'
+    ])
