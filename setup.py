@@ -13,7 +13,7 @@ setup(
     description='Script to parse new leak files',
     scripts=['bin/pnl'],
     package_data={
-        'pnl': ['VERSION'],
+        'pnl': [VERSION],
     },
     python_requires='>=3.6.*, <4',
     install_requires=[
