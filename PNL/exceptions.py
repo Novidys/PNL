@@ -25,3 +25,7 @@ class PNLNoEmailFound(Exception):
 
 class PNLHashSuspected(Exception):
     pass
+
+
+class PNLNoStatsReceived(Exception):
+    pass

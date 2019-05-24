@@ -19,13 +19,18 @@ def percentage(part, whole):
 
 
 def main():
+    g_emailonly_credential = 0
+    g_noemail_credential = 0
+    g_total_credential = 0
+    g_total_line = 0
+
     parser = argparse.ArgumentParser(description='Leak parser written in Python')
     parser.add_argument('-c', '--channel', required=True, help='Redis channel to write to')
     parser.add_argument('-H', '--host', default='127.0.0.1', help='Redis host to connect to')
     parser.add_argument('-P', '--port', default=6379, type=int, help='Redis port to connect to')
     parser.add_argument('-D', '--debug', action='store_true', help='Launch the command in debug mode')
     parser.add_argument('-d', '--directory', required=True, help='Directory to analyze')
-    parser.add_argument('-t', '--thread', required=False, default=1, type=int, help='Number of threads to create')
+    parser.add_argument('-w', '--worker', required=False, default=1, type=int, help='Number of workers to create')
     parser.add_argument('-e', '--extensions', nargs='+', choices=['noext', 'txt', 'zip'], required=True,
                         help='File extensions to parse')
     args = parser.parse_args()
@@ -46,16 +51,14 @@ def main():
     logger = logging.getLogger('pnl')
     fifo_in = queue.Queue()
     fifo_out = queue.Queue()
-    lock = threading.Lock()
+    fifo_stats = queue.Queue()
     files_event = threading.Event()
     cred_event = threading.Event()
     stop_event = threading.Event()
     condition_credential = threading.Condition()
     condition_redis = threading.Condition()
-    redis_thread_number = args.thread
-
-    global g_emailonly_credential
-    global g_noemail_credential
+    # This is the default number of connection in redis pool
+    redis_thread_number = 4
 
     # Connect to Redis
     try:
@@ -69,9 +72,10 @@ def main():
         condition_credential.acquire()
         condition_redis.acquire()
 
-        logger.info('Creating %d CredentialWorker' % args.thread)
-        for worker_id in range(args.thread):
-            t = CredentialWorker(worker_id, stop_event, files_event, condition_credential, lock, fifo_in, fifo_out)
+        logger.info('Creating %d CredentialWorker' % args.worker)
+        for worker_id in range(args.worker):
+            t = CredentialWorker(worker_id, stop_event, files_event, condition_credential, fifo_in, fifo_out,
+                                 fifo_stats)
             t.start()
             logger.debug('Created WorkerThread %d', t.ident)
 
@@ -96,9 +100,17 @@ def main():
         files_event.set()
 
         logger.info('Waiting for CredentialWorker to finish')
-        waiting_workers = args.thread
+        waiting_workers = args.worker
         while waiting_workers > 0:
             condition_credential.wait()
+            try:
+                a, b, c, d = fifo_stats.get()
+            except queue.Empty:
+                raise PNLNoStatsReceived
+            g_total_line += a
+            g_total_credential += b
+            g_noemail_credential += c
+            g_emailonly_credential += d
             waiting_workers -= 1
         condition_credential.release()
 
@@ -114,7 +126,6 @@ def main():
         condition_redis.release()
 
         print('All credentials have been sent to Redis')
-        g_total_credential = 0
 
     except KeyboardInterrupt:
         logger.info('PNL has been interrupted manually. Workers will be stopped')
@@ -126,14 +137,17 @@ def main():
             pass
 
     # Display statistics
-    #g_noemail_credential_percent = percentage(g_noemail_credential, g_total_credential)
-    #g_emailonly_credential_percent = percentage(g_emailonly_credential, g_total_credential)
-    #print('Found total credentials:', g_total_credential)
-    #print('Found email only credentials:', g_emailonly_credential,
-    #      '({:.2f})'.format(g_emailonly_credential_percent))
-    #print('Found no email credentials:', g_noemail_credential, '({:.2f})'.format(g_noemail_credential_percent))
-    #logger.info('Total:%d NoEmail:%d (%.2f) EmailOnly:%d (%.2f)', g_total_credential, g_noemail_credential,
-    #           g_noemail_credential_percent, g_emailonly_credential, g_emailonly_credential_percent)
+    g_total_credential_percent = percentage(g_total_credential, g_total_line)
+    g_noemail_credential_percent = percentage(g_noemail_credential, g_total_line)
+    g_emailonly_credential_percent = percentage(g_emailonly_credential, g_total_line)
+    print('Total lines analyzed:', g_total_line)
+    print('Credentials found:', g_total_credential, '({:.2f})'.format(g_total_credential_percent))
+    print('Credentials with email only:', g_emailonly_credential,
+          '({:.2f})'.format(g_emailonly_credential_percent))
+    print('Credentials with no email:', g_noemail_credential, '({:.2f})'.format(g_noemail_credential_percent))
+    logger.info('Line:%d Creds:%d (%.2f) NoEmail:%d (%.2f) EmailOnly:%d (%.2f)', g_total_line, g_total_credential,
+                g_total_credential_percent, g_noemail_credential, g_noemail_credential_percent, g_emailonly_credential,
+                g_emailonly_credential_percent)
 
     # Execution time
     end = time.time()

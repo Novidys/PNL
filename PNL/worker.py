@@ -8,6 +8,8 @@ import chardet
 from PNL.credentials import Credential
 from PNL.exceptions import *
 
+g_total_credential = 0
+g_total_line = 0
 g_emailonly_credential = 0
 g_noemail_credential = 0
 
@@ -49,14 +51,18 @@ class RedisWorker(threading.Thread):
 
 class CredentialWorker(threading.Thread):
 
-    def __init__(self, worker_id, stop_event, files_event, condition, lock, fifo_in, fifo_out):
+    def __init__(self, worker_id, stop_event, files_event, condition, fifo_in, fifo_out, fifo_stats):
         self.stop = stop_event
         self.files_event = files_event
-        self.lock = lock
         self.logger = logging.getLogger('pnl')
         self.fifo_in = fifo_in
         self.fifo_out = fifo_out
+        self.fifo_stats = fifo_stats
         self.condition = condition
+        self.emailonly_credential = 0
+        self.noemail_credential = 0
+        self.total_line = 0
+        self.total_credential = 0
         threading.Thread.__init__(self, name='CredentialWorkerThread'+str(worker_id))
 
     @staticmethod
@@ -78,22 +84,15 @@ class CredentialWorker(threading.Thread):
         return decoded_line
 
     def run(self):
-        cred = 0
-        emailonly_credential = 0
-        noemail_credential = 0
-        global g_emailonly_credential
-        global g_noemail_credential
         while True:
             try:
                 filename = self.fifo_in.get(block=False)
                 self.logger.debug('Get filename %s' % filename)
             except queue.Empty:
                 if self.files_event.isSet():
+                    self.fifo_stats.put((self.total_line, self.total_credential, self.noemail_credential,
+                                         self.emailonly_credential))
                     self.logger.debug('Filesystem analysis is finished')
-                    self.lock.acquire()
-                    g_emailonly_credential += emailonly_credential
-                    g_noemail_credential += noemail_credential
-                    self.lock.release()
                     break
             else:
                 line_number = 1
@@ -119,22 +118,22 @@ class CredentialWorker(threading.Thread):
                             except PNLOnlyEMail:
                                 self.logger.info('Only email found in %s on line %d' % (filename, line_number))
                                 self.logger.debug(decoded_line)
-                                emailonly_credential += 1
+                                self.emailonly_credential += 1
                             except PNLNoEmailFound:
-                                self.logger.info('No email found in before sep %s on line %d' % (filename, line_number))
+                                self.logger.info('No email found before sep in %s on line %d' % (filename, line_number))
                                 self.logger.debug(decoded_line)
-                                noemail_credential += 1
+                                self.noemail_credential += 1
                             except PNLHashSuspected:
                                 self.logger.info('Hash suspected in %s on line %d' % (filename, line_number))
                                 self.logger.debug(decoded_line)
                             else:
                                 self.fifo_out.put(credential.return_credentials())
-                                cred += 1
                                 file_cred += 1
+                                self.total_credential += 1
                         line_number += 1
+                        self.total_line += 1
                     self.logger.info('Read %d lines in %s' % (line_number-1, filename))
                     self.logger.info('Found %d credentials in %s' % (file_cred, filename))
-
                 if self.stop.isSet():
                     self.logger.info('Received stop event')
                     break
