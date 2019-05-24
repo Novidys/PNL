@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # coding : utf-8
 import re
+import json
+
 
 from PNL.exceptions import *
 
@@ -16,17 +18,17 @@ class Credential(object):
         self._separator = None
         self._username = None
         self._domain = None
-        self.extract_posix_email()
-        self.extract_separator()
-        self.extract_email()
-        self.extract_password()
+        self._extract_posix_email()
+        self._extract_separator()
+        self._extract_email()
+        self._extract_password()
 
     def __setattr__(self, name, value):
         if name == '_email' and value:
             self._length_email = len(value)
         object.__setattr__(self, name, value)
 
-    def extract_posix_email(self):
+    def _extract_posix_email(self):
         posix_email = r'(?:[a-zA-Z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-zA-Z0-9!#$%&\'\.*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")\.?@(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-zA-Z0-9-]*[a-zA-Z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])'
 
         m = re.match(posix_email, self._line)
@@ -36,12 +38,7 @@ class Credential(object):
         else:
             self._posixemail = ''
 
-    def extract_separator(self):
-        #if self._length_email == self._length_line:
-        #    raise PNLOnlyEMail
-        #self._separator = self._line[self._length_email]
-        #if self._separator not in [':', ';']:
-        #    print(self._line)
+    def _extract_separator(self):
         dict_separators = {}
         for separator in ['|', ';', ':']:
             pos = self._line.find(separator)
@@ -52,13 +49,13 @@ class Credential(object):
         else:
             raise PNLOnlyEMail
 
-    def extract_email(self):
+    def _extract_email(self):
         self._email = self._line.split(self._separator, 1)[0]
         if '@' not in self._email:
             raise PNLNoEmailFound
         self._username, self._domain = self._email.rsplit('@', maxsplit=1)
 
-    def extract_password(self):
+    def _extract_password(self):
         payload = self._line.split(self._separator, maxsplit=1)[1]
         if self._separator in payload:
             # TODO : look for hash values in there
@@ -70,3 +67,10 @@ class Credential(object):
             self._password = payload
         else:
             self._password = payload
+
+    def return_credentials(self):
+        return json.dumps({'posix_email': self._posixemail,
+                          'email': self._email,
+                          'username': self._username,
+                          'domain': self._domain,
+                          'password': self._password})

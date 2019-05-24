@@ -4,21 +4,60 @@ import threading
 import logging
 import queue
 import chardet
-import re
 
 from PNL.credentials import Credential
 from PNL.exceptions import *
 
+g_emailonly_credential = 0
+g_noemail_credential = 0
 
-class Worker(threading.Thread):
-    name = 'WorkerThread'
 
-    def __init__(self, fifo_in, fifo_out):
-        self.stop = threading.Event()
+class RedisWorker(threading.Thread):
+
+    def __init__(self, worker_id, stop_event, cred_event, condition, redis, fifo, channel):
+        self.stop_event = stop_event
+        self.logger = logging.getLogger('pnl')
+        self.fifo = fifo
+        self.redis = redis
+        self.channel = channel
+        self.cred_event = cred_event
+        self.condition = condition
+        threading.Thread.__init__(self, name='RedisWorkerThread'+str(worker_id))
+
+    def run(self):
+        cred_sent = 0
+        while True:
+            if self.stop_event.isSet():
+                self.logger.info('Received stop event')
+                break
+            try:
+                credential = self.fifo.get(block=False)
+            except queue.Empty:
+                if self.cred_event.isSet():
+                    self.logger.info('Credential analysis is finished')
+                    self.logger.info('Sent %d credentials to Redis' % cred_sent)
+                    break
+            else:
+                self.redis.publish(self.channel, credential)
+                cred_sent += 1
+                if cred_sent % 10000 == 0:
+                    self.logger.info('Sent %d credentials to Redis' % cred_sent)
+        self.condition.acquire()
+        self.condition.notify()
+        self.condition.release()
+
+
+class CredentialWorker(threading.Thread):
+
+    def __init__(self, worker_id, stop_event, files_event, condition, lock, fifo_in, fifo_out):
+        self.stop = stop_event
+        self.files_event = files_event
+        self.lock = lock
         self.logger = logging.getLogger('pnl')
         self.fifo_in = fifo_in
         self.fifo_out = fifo_out
-        threading.Thread.__init__(self)
+        self.condition = condition
+        threading.Thread.__init__(self, name='CredentialWorkerThread'+str(worker_id))
 
     @staticmethod
     def return_decoded_line(line):
@@ -32,27 +71,34 @@ class Worker(threading.Thread):
                 try:
                     decoded_line = line.decode(encoding=dict_charset['encoding']).rstrip('\n').rstrip('\r')
                 except ValueError:
-                    raise PNLNonWorkingEncoding('Charset', dict_charset['encoding'], 'Confidence %f',
-                                                dict_charset['confidence'])
+                    raise PNLNonWorkingEncoding(dict_charset['encoding'], dict_charset['confidence'])
             else:
                 raise PNLUnknownEncoding
 
         return decoded_line
 
     def run(self):
-        total_credential = 0
+        cred = 0
         emailonly_credential = 0
         noemail_credential = 0
+        global g_emailonly_credential
+        global g_noemail_credential
         while True:
             try:
                 filename = self.fifo_in.get(block=False)
+                self.logger.debug('Get filename %s' % filename)
             except queue.Empty:
-                self.logger.info('Worker has finished')
-                self.fifo_out.put((total_credential, noemail_credential, emailonly_credential))
-                break
+                if self.files_event.isSet():
+                    self.logger.debug('Filesystem analysis is finished')
+                    self.lock.acquire()
+                    g_emailonly_credential += emailonly_credential
+                    g_noemail_credential += noemail_credential
+                    self.lock.release()
+                    break
             else:
                 line_number = 1
                 with open(filename, 'rb') as fd:
+                    file_cred = 0
                     for line in fd:
 
                         if self.stop.isSet():
@@ -60,29 +106,39 @@ class Worker(threading.Thread):
 
                         try:
                             decoded_line = self.return_decoded_line(line)
-                        except PNLUnknownEncoding as e:
+                        except PNLUnknownEncoding:
                             self.logger.info('Unknown encoding in %s on line %d' % (filename, line_number))
-                            continue
                         except PNLNonWorkingEncoding as e:
-                            self.logger.info('Error in charset detection. %s', str(e))
-                            continue
-
-                        try:
-                            credential = Credential(decoded_line)
-                        #except PNLNonPosixEmailAddress:
-                        #    self.logger.info('Non POSIX email address in %s on line %d' % (filename, line_number))
-                        except PNLOnlyEMail:
-                            self.logger.info('Only email found in %s on line %d' % (filename, line_number))
-                            emailonly_credential += 1
-                        except PNLNoEmailFound:
-                            self.logger.info('No email found in before sep %s on line %d' % (filename, line_number))
-                            noemail_credential += 1
-                        except PNLHashSuspected:
-                            self.logger.info('Hash suspected in %s on line %d' % (filename, line_number))
+                            self.logger.info('Error in charset detection. Charset %s. Confidence %s' %
+                                             (e.encoding, e.confidence))
                         else:
-                            total_credential += 1
-
+                            try:
+                                credential = Credential(decoded_line)
+                            #except PNLNonPosixEmailAddress:
+                            #    self.logger.info('Non POSIX email address in %s on line %d' % (filename, line_number))
+                            except PNLOnlyEMail:
+                                self.logger.info('Only email found in %s on line %d' % (filename, line_number))
+                                self.logger.debug(decoded_line)
+                                emailonly_credential += 1
+                            except PNLNoEmailFound:
+                                self.logger.info('No email found in before sep %s on line %d' % (filename, line_number))
+                                self.logger.debug(decoded_line)
+                                noemail_credential += 1
+                            except PNLHashSuspected:
+                                self.logger.info('Hash suspected in %s on line %d' % (filename, line_number))
+                                self.logger.debug(decoded_line)
+                            else:
+                                self.fifo_out.put(credential.return_credentials())
+                                cred += 1
+                                file_cred += 1
                         line_number += 1
+                    self.logger.info('Read %d lines in %s' % (line_number-1, filename))
+                    self.logger.info('Found %d credentials in %s' % (file_cred, filename))
+
                 if self.stop.isSet():
-                    self.logger.info('Worker has been asked to stop')
+                    self.logger.info('Received stop event')
                     break
+        self.condition.acquire()
+        self.condition.notify()
+        self.condition.release()
+        self.logger.info('Worker has finished')

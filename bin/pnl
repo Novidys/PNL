@@ -8,9 +8,10 @@ import logging
 import queue
 import threading
 import time
+import redis
 
 
-from PNL.worker import Worker
+from PNL.worker import *
 
 
 def percentage(part, whole):
@@ -19,6 +20,9 @@ def percentage(part, whole):
 
 def main():
     parser = argparse.ArgumentParser(description='Leak parser written in Python')
+    parser.add_argument('-c', '--channel', required=True, help='Redis channel to write to')
+    parser.add_argument('-H', '--host', default='127.0.0.1', help='Redis host to connect to')
+    parser.add_argument('-P', '--port', default=6379, type=int, help='Redis port to connect to')
     parser.add_argument('-D', '--debug', action='store_true', help='Launch the command in debug mode')
     parser.add_argument('-d', '--directory', required=True, help='Directory to analyze')
     parser.add_argument('-t', '--thread', required=False, default=1, type=int, help='Number of threads to create')
@@ -38,70 +42,107 @@ def main():
     else:
         logging.basicConfig(filename=log_file, level=logging.INFO, format=my_logging_format)
 
+    start = time.time()
     logger = logging.getLogger('pnl')
-
-    logger.info('Enumerating files')
-
     fifo_in = queue.Queue()
     fifo_out = queue.Queue()
+    lock = threading.Lock()
+    files_event = threading.Event()
+    cred_event = threading.Event()
+    stop_event = threading.Event()
+    condition_credential = threading.Condition()
+    condition_redis = threading.Condition()
+    redis_thread_number = args.thread
 
-    for o in Path(args.directory).glob('**/*'):
-        if o.is_file():
-            if o.suffix == '' and 'noext' in args.extensions:
-                fifo_in.put(str(o))
-            elif o.suffix in args.extensions:
-                fifo_in.put(str(o))
+    global g_emailonly_credential
+    global g_noemail_credential
 
-    logger.info('Found %d to analyze' % fifo_in.qsize())
-
-    start = time.time()
-
-    logger.info('Creating %d workers' % args.thread)
-    while threading.active_count() < args.thread + 1:
-        t = Worker(fifo_in, fifo_out)
-        t.start()
-        logger.debug('Created thread %d', t.ident)
+    # Connect to Redis
+    try:
+        r = redis.StrictRedis(host=args.host, port=args.port)
+    except redis.ConnectionError:
+        print('Redis connection error', file=sys.stderr)
+        exit(1)
 
     try:
-        logger.info('Waiting for workers to finish')
-        while threading.active_count() > 1:
-            time.sleep(0.1)
+        # Handle conditions
+        condition_credential.acquire()
+        condition_redis.acquire()
+
+        logger.info('Creating %d CredentialWorker' % args.thread)
+        for worker_id in range(args.thread):
+            t = CredentialWorker(worker_id, stop_event, files_event, condition_credential, lock, fifo_in, fifo_out)
+            t.start()
+            logger.debug('Created WorkerThread %d', t.ident)
+
+        logger.info('Creating %d RedisWorker' % redis_thread_number)
+        for worker_id in range(redis_thread_number):
+            t = RedisWorker(worker_id, stop_event, cred_event, condition_redis, r, fifo_out, args.channel)
+            t.start()
+            logger.debug('Created RedisThread %d', t.ident)
+
+        print('Enumerating files')
+        logger.info('Enumerating files')
+        for o in Path(args.directory).glob('**/*'):
+            if o.is_file():
+                if o.suffix == '' and 'noext' in args.extensions:
+                    fifo_in.put(str(o))
+                elif o.suffix in args.extensions:
+                    fifo_in.put(str(o))
+        logger.info('Found %d files to analyze' % fifo_in.qsize())
+
+        # Indicate to CredentialWorker that the filesystem has been analyzed
+        print('Filesystem analysis is done')
+        files_event.set()
+
+        logger.info('Waiting for CredentialWorker to finish')
+        waiting_workers = args.thread
+        while waiting_workers > 0:
+            condition_credential.wait()
+            waiting_workers -= 1
+        condition_credential.release()
+
+        # Indicate to RedisWorker that all credentials have been extracted
+        print('Credential analysis is done')
+        cred_event.set()
+
+        logger.info('Waiting for RedisWorker to finish')
+        waiting_workers = redis_thread_number
+        while waiting_workers > 0:
+            condition_redis.wait()
+            waiting_workers -= 1
+        condition_redis.release()
+
+        print('All credentials have been sent to Redis')
+        g_total_credential = 0
+
     except KeyboardInterrupt:
-        logger.info('PNL has been interrupted manually. Threads will be stopped')
-        for thread in threading.enumerate():
-            if thread is threading.main_thread():
-                continue
-            thread.stop.set()
-
-    # Get statistics
-    glob_total_credential = 0
-    glob_emailonly_credential = 0
-    glob_noemail_credential = 0
-    while True:
+        logger.info('PNL has been interrupted manually. Workers will be stopped')
+        stop_event.set()
         try:
-            tc, nc, ec = fifo_out.get(block=False)
-            print(tc, nc, ec)
-            glob_total_credential += tc
-            glob_emailonly_credential += ec
-            glob_noemail_credential += nc
-        except queue.Empty:
-            logger.info('Collected all stats from workers')
-            break
+            condition_credential.release()
+            condition_redis.release()
+        except RuntimeError:
+            pass
 
-    #Display statistics
-    glob_noemail_credential_percent = percentage(glob_noemail_credential, glob_total_credential)
-    glob_emailonly_credential_percent = percentage(glob_emailonly_credential, glob_total_credential)
-    print('Found total credentials:', glob_total_credential)
-    print('Found email only credentials:', glob_emailonly_credential,
-          '({:.2f})'.format(glob_emailonly_credential_percent))
-    print('Found no email credentials:', glob_noemail_credential, '({:.2f})'.format(glob_noemail_credential_percent))
+    # Display statistics
+    #g_noemail_credential_percent = percentage(g_noemail_credential, g_total_credential)
+    #g_emailonly_credential_percent = percentage(g_emailonly_credential, g_total_credential)
+    #print('Found total credentials:', g_total_credential)
+    #print('Found email only credentials:', g_emailonly_credential,
+    #      '({:.2f})'.format(g_emailonly_credential_percent))
+    #print('Found no email credentials:', g_noemail_credential, '({:.2f})'.format(g_noemail_credential_percent))
+    #logger.info('Total:%d NoEmail:%d (%.2f) EmailOnly:%d (%.2f)', g_total_credential, g_noemail_credential,
+    #           g_noemail_credential_percent, g_emailonly_credential, g_emailonly_credential_percent)
 
     # Execution time
     end = time.time()
     hours, rem = divmod(end - start, 3600)
     minutes, seconds = divmod(rem, 60)
-
+    print('')
     print('Execution time:', '{:0>2}:{:0>2}:{:05.2f}'.format(int(hours), int(minutes), seconds))
+    logger.info('Execution time:{:0>2}:{:0>2}:{:05.2f}'.format(int(hours), int(minutes), seconds))
+
     logger.info('Workers have finished')
 
 

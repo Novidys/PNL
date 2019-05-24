@@ -15,7 +15,9 @@ class PNLUnknownEncoding(Exception):
 
 
 class PNLNonWorkingEncoding(Exception):
-    pass
+    def __init__(self, encoding, confidence):
+        self.encoding = encoding
+        self.confidence = confidence
 
 
 class PNLNoEmailFound(Exception):
