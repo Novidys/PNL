@@ -25,7 +25,7 @@ def main():
     g_total_line = 0
 
     parser = argparse.ArgumentParser(description='Leak parser written in Python')
-    parser.add_argument('-c', '--channel', required=True, help='Redis channel to write to')
+    parser.add_argument('-c', '--channel', required=True, help='Redis channel to publish to')
     parser.add_argument('-H', '--host', default='127.0.0.1', help='Redis host to connect to')
     parser.add_argument('-P', '--port', default=6379, type=int, help='Redis port to connect to')
     parser.add_argument('-D', '--debug', action='store_true', help='Launch the command in debug mode')
@@ -79,12 +79,6 @@ def main():
             t.start()
             logger.debug('Created WorkerThread %d', t.ident)
 
-        logger.info('Creating %d RedisWorker' % redis_thread_number)
-        for worker_id in range(redis_thread_number):
-            t = RedisWorker(worker_id, stop_event, cred_event, condition_redis, r, fifo_out, args.channel)
-            t.start()
-            logger.debug('Created RedisThread %d', t.ident)
-
         print('Enumerating files')
         logger.info('Enumerating files')
         for o in Path(args.directory).glob('**/*'):
@@ -98,6 +92,19 @@ def main():
         # Indicate to CredentialWorker that the filesystem has been analyzed
         print('Filesystem analysis is done')
         files_event.set()
+
+        # Check if there is a subscriber
+        while r.pubsub_numsub(args.channel)[0][1] == 0:
+            print('Please, launch a subscriber, then press enter to continue')
+            input('...')
+
+        print('Credential analysis started')
+
+        logger.info('Creating %d RedisWorker' % redis_thread_number)
+        for worker_id in range(redis_thread_number):
+            t = RedisWorker(worker_id, stop_event, cred_event, condition_redis, r, fifo_out, args.channel)
+            t.start()
+            logger.debug('Created RedisThread %d', t.ident)
 
         logger.info('Waiting for CredentialWorker to finish')
         waiting_workers = args.worker
@@ -137,17 +144,18 @@ def main():
             pass
 
     # Display statistics
-    g_total_credential_percent = percentage(g_total_credential, g_total_line)
-    g_noemail_credential_percent = percentage(g_noemail_credential, g_total_line)
-    g_emailonly_credential_percent = percentage(g_emailonly_credential, g_total_line)
-    print('Total lines analyzed:', g_total_line)
-    print('Credentials found:', g_total_credential, '({:.2f})'.format(g_total_credential_percent))
-    print('Credentials with email only:', g_emailonly_credential,
-          '({:.2f})'.format(g_emailonly_credential_percent))
-    print('Credentials with no email:', g_noemail_credential, '({:.2f})'.format(g_noemail_credential_percent))
-    logger.info('Line:%d Creds:%d (%.2f) NoEmail:%d (%.2f) EmailOnly:%d (%.2f)', g_total_line, g_total_credential,
-                g_total_credential_percent, g_noemail_credential, g_noemail_credential_percent, g_emailonly_credential,
-                g_emailonly_credential_percent)
+    if g_total_line:
+        g_total_credential_percent = percentage(g_total_credential, g_total_line)
+        g_noemail_credential_percent = percentage(g_noemail_credential, g_total_line)
+        g_emailonly_credential_percent = percentage(g_emailonly_credential, g_total_line)
+        print('Total lines analyzed:', g_total_line)
+        print('Credentials found:', g_total_credential, '({:.2f})'.format(g_total_credential_percent))
+        print('Credentials with email only:', g_emailonly_credential,
+              '({:.2f})'.format(g_emailonly_credential_percent))
+        print('Credentials with no email:', g_noemail_credential, '({:.2f})'.format(g_noemail_credential_percent))
+        logger.info('Line:%d Creds:%d (%.2f) NoEmail:%d (%.2f) EmailOnly:%d (%.2f)', g_total_line, g_total_credential,
+                    g_total_credential_percent, g_noemail_credential, g_noemail_credential_percent, g_emailonly_credential,
+                    g_emailonly_credential_percent)
 
     # Execution time
     end = time.time()

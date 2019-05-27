@@ -130,6 +130,7 @@ class CredentialWorker(threading.Thread):
                                 self.fifo_out.put(credential.return_credentials())
                                 file_cred += 1
                                 self.total_credential += 1
+                                del credential
                         line_number += 1
                         self.total_line += 1
                     self.logger.info('Read %d lines in %s' % (line_number-1, filename))
