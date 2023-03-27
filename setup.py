@@ -18,5 +18,5 @@ setup(
     python_requires='>=3.6.*, <4',
     install_requires=[
         'chardet==3.0.4',
-        'redis==3.2.1'
+        'redis==4.5.3'
     ])
